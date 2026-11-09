@@ -12,6 +12,9 @@
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <!-- Three.js for 3D Background Particles -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <!-- Firebase: حفظ المشاركات ومشاركتها بين جميع الأجهزة لحظياً -->
+    <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
 
     <script>
         tailwind.config = {
@@ -924,6 +927,7 @@
                 <div>
                     <h2 class="text-xl font-black text-white">أضئ نجمتك على خريطة عُمان</h2>
                     <p class="text-xs text-omanLightGold font-tajawal">ستظهر مشاركتك فوراً كنجمة ثلاثية الأبعاد أمام الجميع</p>
+                    <p id="cloud-badge" class="text-[11px] text-gray-300 font-tajawal mt-1 flex items-center gap-1.5"><span class="w-2 h-2 rounded-full bg-amber-400 inline-block"></span> جارٍ الاتصال بقاعدة البيانات...</p>
                 </div>
             </div>
 
@@ -1357,6 +1361,100 @@
         }
 
         // Load from localStorage or use initial data
+        /**************************************************************
+         * CLOUD — قاعدة بيانات Firebase المشتركة لجميع الزائرين
+         **************************************************************/
+        const FIREBASE_CONFIG = {
+            apiKey: "AIzaSyC0FRNOOsieL9uEU5BExtcvxyJxs946D8o",
+            authDomain: "khawla-omani-day.firebaseapp.com",
+            projectId: "khawla-omani-day",
+            storageBucket: "khawla-omani-day.firebasestorage.app",
+            messagingSenderId: "732487735176",
+            appId: "1:732487735176:web:e48497512c369d7ebccc3d"
+        };
+        const Cloud = (() => {
+            const api = { ok: false, ownIds: new Set() };
+            let db = null, firstSnapshot = true, remote = [];
+            function relTime(d) {
+                if (!d) return 'الآن';
+                const s = Math.max(0, (Date.now() - d.getTime()) / 1000);
+                if (s < 60) return 'الآن';
+                if (s < 3600) return `منذ ${Math.floor(s / 60)} دقيقة`;
+                if (s < 86400) return `منذ ${Math.floor(s / 3600)} ساعة`;
+                return `منذ ${Math.floor(s / 86400)} يوم`;
+            }
+            function merge() {
+                const keepId = starsData[currentSpotlightIndex] && starsData[currentSpotlightIndex].id;
+                starsData = [...remote, ...INITIAL_STARS];
+                const i = starsData.findIndex(s => s.id === keepId);
+                currentSpotlightIndex = i >= 0 ? i : 0;
+            }
+            api.init = function () {
+                try {
+                    if (typeof firebase === 'undefined') return false;
+                    firebase.initializeApp(FIREBASE_CONFIG);
+                    db = firebase.firestore();
+                    api.ok = true;
+                    db.collection('stars').orderBy('createdAt', 'desc').limit(400).onSnapshot(snap => {
+                        const incoming = [];
+                        snap.docChanges().forEach(ch => {
+                            if (ch.type === 'added' && !firstSnapshot && !api.ownIds.has(ch.doc.id)) incoming.push(ch.doc.id);
+                        });
+                        remote = snap.docs.map(doc => {
+                            const d = doc.data({ serverTimestamps: 'estimate' });
+                            const t = d.createdAt && d.createdAt.toDate ? d.createdAt.toDate() : null;
+                            return { id: doc.id, author: d.author, gov: d.gov, type: d.type, message: d.message, likes: d.likes || 0, time: relTime(t) };
+                        });
+                        firstSnapshot = false;
+                        merge();
+                        layoutStars();
+                        // بصمات جديدة من أجهزة أخرى: تنطلق كصاروخ ضوئي على شاشة العرض
+                        incoming.forEach((id, k) => {
+                            const st = starsData.find(s => s.id === id); if (!st) return;
+                            if (Map3D.ok) {
+                                Map3D.launchComet(st, () => {
+                                    playRoyalChime('add');
+                                    showCelebrationToast(`بصمة جديدة من "${st.author}" في ${st.gov} ✨`);
+                                    renderAll();
+                                });
+                            } else {
+                                showCelebrationToast(`بصمة جديدة من "${st.author}" في ${st.gov} ✨`);
+                            }
+                        });
+                        renderAll();
+                        updateCloudBadge(true);
+                    }, err => { console.warn('Firestore listen error', err); updateCloudBadge(false); });
+                    return true;
+                } catch (e) {
+                    console.warn('Firebase init failed — local mode', e);
+                    api.ok = false;
+                    return false;
+                }
+            };
+            api.newId = () => db.collection('stars').doc().id;
+            api.save = function (star) {
+                api.ownIds.add(star.id);
+                return db.collection('stars').doc(star.id).set({
+                    author: star.author, gov: star.gov, type: star.type, message: star.message,
+                    likes: 1, createdAt: firebase.firestore.FieldValue.serverTimestamp()
+                });
+            };
+            api.like = function (star) {
+                if (!remote.some(s => s.id === star.id)) return;  // البصمات الافتتاحية محلية فقط
+                db.collection('stars').doc(star.id).update({ likes: firebase.firestore.FieldValue.increment(1) }).catch(e => console.warn(e));
+            };
+            return api;
+        })();
+
+        function updateCloudBadge(online) {
+            const el = document.getElementById('cloud-badge'); if (!el) return;
+            el.innerHTML = online
+                ? '<span class="w-2 h-2 rounded-full bg-emerald-400 inline-block animate-pulse"></span> متصل • المشاركات تُحفظ للجميع'
+                : '<span class="w-2 h-2 rounded-full bg-rose-400 inline-block"></span> غير متصل • المشاركات على هذا الجهاز فقط';
+        }
+
+        let lastSubmitAt = 0;
+
         function loadStarsData() {
             try {
                 const saved = localStorage.getItem('oman_foundation_mural_stars_v1');
@@ -1598,6 +1696,7 @@
             const star = starsData[currentSpotlightIndex];
             if (!star) return;
             star.likes = (star.likes || 0) + 1;
+            if (Cloud.ok) Cloud.like(star);
             playRoyalChime('select');
             saveStarsData();
             updateSpotlightDisplay(star);
@@ -1698,6 +1797,8 @@
             const message = document.getElementById('input-message').value.trim();
 
             if (!author || !message) return;
+            if (Date.now() - lastSubmitAt < 15000) { showCelebrationToast('انتظري لحظات قبل إضافة بصمة جديدة 🌟'); return; }
+            lastSubmitAt = Date.now();
 
             // Compute coordinates inside the selected governorate with slight organic spread
             const govObj = OMAN_GOVERNORATES.find(g => g.name === govName) || OMAN_GOVERNORATES[0];
@@ -1705,7 +1806,7 @@
             const offsetY = (Math.random() - 0.5) * govObj.spread.y;
 
             const newStar = {
-                id: 'st-' + Date.now(),
+                id: Cloud.ok ? Cloud.newId() : 'st-' + Date.now(),
                 author,
                 gov: govName,
                 type,
@@ -1721,7 +1822,14 @@
             // Add to beginning of array
             starsData.unshift(newStar);
             currentSpotlightIndex = 0;
-            saveStarsData();
+            if (Cloud.ok) {
+                Cloud.save(newStar).catch(err => {
+                    console.warn(err);
+                    showCelebrationToast('تعذّر حفظ البصمة في قاعدة البيانات، تحققي من الاتصال وأعيدي المحاولة');
+                });
+            } else {
+                saveStarsData();
+            }
 
             // Close modal & reset form
             closeParticipationModal();
@@ -2988,7 +3096,8 @@
          * 9. INITIALIZE ON WINDOW LOAD
          **************************************************************/
         window.onload = function () {
-            loadStarsData();
+            const cloudOn = Cloud.init();
+            if (cloudOn) { starsData = [...INITIAL_STARS]; } else { loadStarsData(); updateCloudBadge(false); }
             if (Map3D.init()) {
                 document.getElementById('map3d-container').classList.add('on');
                 document.getElementById('map-scene').style.display = 'none';
